@@ -4,11 +4,13 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.SystemClock
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import com.metrolist.innertube.YouTube
 import com.metrolist.music.models.MediaMetadata
 import com.metrolist.music.sonos.SonosClient
 import com.metrolist.music.sonos.SonosDiscovery
 import com.metrolist.music.sonos.SonosRoom
+import com.metrolist.music.sonos.SonosSessionPlayer
 import com.metrolist.music.sonos.SonosStreamServer
 import com.metrolist.music.sonos.SonosTrackMetadata
 import com.metrolist.music.ui.utils.resize
@@ -20,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,6 +39,7 @@ import kotlin.math.roundToInt
  * The local ExoPlayer stays the source of truth for the queue; Sonos plays one track
  * at a time, and when it finishes the local queue advances, which loads the next track.
  */
+@UnstableApi
 class CastConnectionHandler(
     context: Context,
     private val scope: CoroutineScope,
@@ -112,6 +116,10 @@ class CastConnectionHandler(
     }
 
     private var client: SonosClient? = null
+    private var sessionPlayer: SonosSessionPlayer? = null
+    private var cachedWrapper: Pair<Player, SonosSessionPlayer>? = null
+    private var pollCount = 0
+    private var lastVolumeChangeAt = 0L
     private var currentMediaId: String? = null
     private var discoveryJob: Job? = null
     private var loadJob: Job? = null
@@ -125,7 +133,29 @@ class CastConnectionHandler(
     @Volatile
     private var lastState = ""
 
+    init {
+        scope.launch {
+            combine(_isCasting, _castIsPlaying, _castIsBuffering, _castPosition, _castVolume) { _, _, _, _, _ -> }
+                .collect { sessionPlayer?.refresh() }
+        }
+    }
+
     fun initialize() = true
+
+    /** While connected, the media session exposes the speaker so volume keys and the notification control it. */
+    fun sessionPlayerFor(player: Player): Player {
+        if (!_isCasting.value) {
+            sessionPlayer = null
+            return player
+        }
+        // Reuse the wrapper for the same player: each one keeps a listener on the player it wraps.
+        val wrapper =
+            cachedWrapper?.takeIf { it.first === player }?.second
+                ?: SonosSessionPlayer(player, this).also { cachedWrapper = player to it }
+        sessionPlayer = wrapper
+        wrapper.refresh()
+        return wrapper
+    }
 
     fun discover() {
         if (discoveryJob?.isActive == true) return
@@ -156,6 +186,7 @@ class CastConnectionHandler(
         _castPosition.value = musicService.player.currentPosition
         _castDuration.value = musicService.player.duration.coerceAtLeast(0L)
         musicService.player.pause()
+        musicService.refreshSessionPlayer()
 
         scope.launch {
             runCatching { client?.volume() }
@@ -181,6 +212,7 @@ class CastConnectionHandler(
         _castDeviceName.value = null
         _castIsPlaying.value = false
         _castIsBuffering.value = false
+        musicService.refreshSessionPlayer()
         streamServer.stop()
         runCatching { wifiLock?.release() }
 
@@ -260,6 +292,7 @@ class CastConnectionHandler(
         val sonos = client ?: return
         val clamped = volume.coerceIn(0f, 1f)
         _castVolume.value = clamped
+        lastVolumeChangeAt = SystemClock.elapsedRealtime()
         scope.launch {
             runCatching { sonos.setVolume((clamped * 100).roundToInt()) }
                 .onFailure { Timber.w(it, "Sonos volume change failed") }
@@ -347,6 +380,13 @@ class CastConnectionHandler(
         if (info.durationMs > 0) _castDuration.value = info.durationMs
         if (state == STATE_PLAYING || state == STATE_PAUSED) _castPosition.value = info.positionMs
 
+        // Pick up volume changes made elsewhere (Sonos app, physical buttons), but not mid-adjustment.
+        if (++pollCount % VOLUME_POLL_EVERY == 0 &&
+            SystemClock.elapsedRealtime() - lastVolumeChangeAt > VOLUME_SETTLE_MS
+        ) {
+            runCatching { sonos.volume() }.getOrNull()?.let { _castVolume.value = it / 100f }
+        }
+
         val duration = _castDuration.value
         val reachedEnd = duration > 0 && previousPosition >= duration - END_TOLERANCE_MS
         if (!awaitingStart && previousState == STATE_PLAYING && state == STATE_STOPPED && reachedEnd) {
@@ -384,5 +424,7 @@ class CastConnectionHandler(
         const val SEEK_THRESHOLD_MS = 2_000L
         const val RESTART_THRESHOLD_MS = 3_000L
         const val LOAD_TIMEOUT_MS = 20_000L
+        const val VOLUME_POLL_EVERY = 3
+        const val VOLUME_SETTLE_MS = 2_000L
     }
 }

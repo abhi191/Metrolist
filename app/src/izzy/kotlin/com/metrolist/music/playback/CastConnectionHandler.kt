@@ -1,6 +1,7 @@
 package com.metrolist.music.playback
 
 import android.content.Context
+import androidx.media3.common.Player
 import com.metrolist.music.models.MediaMetadata
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +25,8 @@ class CastConnectionHandler(
     fun initialize() = false
 
     fun disconnect() = Unit
+
+    fun sessionPlayerFor(player: Player): Player = player
 
     fun loadCurrentMedia() = Unit
 

@@ -150,6 +150,8 @@ class CastConnectionHandler(
         castContext?.sessionManager?.endCurrentSession(true)
     }
 
+    fun sessionPlayerFor(player: Player): Player = player
+
     fun loadCurrentMedia() {
         musicService.currentMediaMetadata.value?.let(::loadMedia)
     }

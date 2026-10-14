@@ -982,7 +982,7 @@ class MusicService :
                 sleepTimer?.player = newPlayer
 
                 try {
-                    mediaSession?.let { (it as MediaSession).player = newPlayer }
+                    mediaSession?.let { (it as MediaSession).player = sessionPlayerFor(newPlayer) }
                 } catch (e: Exception) {
                     Timber.tag(TAG).e(e, "Failed to swap player in MediaSession")
                 }
@@ -4796,6 +4796,17 @@ class MusicService :
             }
         }
 
+    private fun sessionPlayerFor(base: Player): Player = castConnectionHandler?.sessionPlayerFor(base) ?: base
+
+    /** Re-applies the session player after a remote output connects or disconnects. */
+    fun refreshSessionPlayer() {
+        try {
+            mediaSession?.let { (it as MediaSession).player = sessionPlayerFor(player) }
+        } catch (e: Exception) {
+            timber.log.Timber.e(e, "Failed to refresh session player")
+        }
+    }
+
     /**
      * Initialize Google Cast support
      */
@@ -4951,7 +4962,7 @@ class MusicService :
         sleepTimer?.player = player
 
         try {
-            mediaSession?.let { (it as MediaSession).player = player }
+            mediaSession?.let { (it as MediaSession).player = sessionPlayerFor(player) }
         } catch (e: Exception) {
             timber.log.Timber.e(e, "Failed to swap player in MediaSession")
         }
