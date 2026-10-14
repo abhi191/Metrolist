@@ -994,4 +994,9 @@
     <string name="stream_source_web_creator_desc">Creator web client.</string>
     <string name="top_result">Top result</string>
     <string name="other">Other</string>
+    <string name="sonos_play_on">Play on Sonos</string>
+    <string name="sonos_searching">Looking for speakers on this Wi-Fi…</string>
+    <string name="sonos_no_speakers">No Sonos speakers found. Make sure your phone is on the same Wi-Fi network.</string>
+    <string name="sonos_this_phone">This phone</string>
+    <string name="sonos_search_again">Search again</string>
 </resources>

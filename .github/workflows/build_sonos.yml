@@ -1,0 +1,67 @@
+name: Build Sonos branch
+
+# Fork-only workflow: the upstream workflows use Blacksmith runners, which forks can't use.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/sonos-**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: "temurin"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Reusing one keystore keeps the APK signature stable, so new builds install over old ones.
+      - name: Restore debug keystore
+        id: keystore
+        uses: actions/cache/restore@v4
+        with:
+          path: app/sonos-debug.keystore
+          key: sonos-debug-keystore
+
+      - name: Generate debug keystore
+        if: steps.keystore.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -v \
+            -keystore app/sonos-debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Metrolist Sonos,O=Metrolist,C=CA"
+
+      - name: Save debug keystore
+        if: steps.keystore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/sonos-debug.keystore
+          key: sonos-debug-keystore
+
+      - name: Build FOSS debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --console=plain :app:assembleFossDebug --warning-mode summary
+        env:
+          METROLIST_DEBUG_KEYSTORE_PATH: sonos-debug.keystore
+          METROLIST_APP_NAME: Metrolist Sonos
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrolist-sonos-apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

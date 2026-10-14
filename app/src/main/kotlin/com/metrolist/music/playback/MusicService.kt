@@ -4761,24 +4761,37 @@ class MusicService :
      * Get the stream URL for a given media ID.
      * This is used for Google Cast to send the audio URL to Chromecast.
      */
-    suspend fun getStreamUrl(mediaId: String): String? =
+    suspend fun getStreamUrl(mediaId: String): String? = getPlaybackData(mediaId)?.streamUrl
+
+    /**
+     * Resolves a stream for remote playback. [requireMp4] selects an AAC stream for
+     * renderers that cannot decode Opus, and disables bounded ranges so plain HTTP
+     * Range requests work against the returned URL.
+     */
+    suspend fun getPlaybackData(
+        mediaId: String,
+        requireMp4: Boolean = false,
+    ): InnerTubeXPlayer.PlaybackData? =
         withContext(Dispatchers.IO) {
             try {
                 val song = database.songEntity(mediaId)
-                val playbackData =
-                    InnerTubeXPlayer
-                        .playerResponseForPlayback(
-                            videoId = mediaId,
-                            audioQuality = audioQuality,
-                            connectivityManager = connectivityManager,
-                            contentHints = ContentHints(
-                                isExplicit = song?.explicit,
-                                isUploaded = song?.isUploaded,
-                            ),
-                        ).getOrNull()
-                playbackData?.streamUrl
+                InnerTubeXPlayer
+                    .playerResponseForPlayback(
+                        videoId = mediaId,
+                        audioQuality = audioQuality,
+                        connectivityManager = connectivityManager,
+                        contentHints = ContentHints(
+                            isExplicit = song?.explicit,
+                            isUploaded = song?.isUploaded,
+                        ),
+                        allowBoundedRange = !requireMp4,
+                        requireMp4 = requireMp4,
+                    ).onFailure { timber.log.Timber.e(it, "Failed to resolve remote stream for $mediaId") }
+                    .getOrNull()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                timber.log.Timber.e(e, "Failed to get stream URL for Cast")
+                timber.log.Timber.e(e, "Failed to resolve remote stream for $mediaId")
                 null
             }
         }
