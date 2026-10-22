@@ -2,6 +2,7 @@ package com.metrolist.music.playback
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -115,6 +116,15 @@ class CastConnectionHandler(
             ?.apply { setReferenceCounted(false) }
     }
 
+    // The local player is paused while a speaker plays, so nothing else keeps the CPU awake.
+    // Without this, polling and the stream server stall once the screen turns off.
+    private val wakeLock by lazy {
+        appContext
+            .getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "metrolist:sonos")
+            ?.apply { setReferenceCounted(false) }
+    }
+
     private var client: SonosClient? = null
     private var sessionPlayer: SonosSessionPlayer? = null
     private var cachedWrapper: Pair<Player, SonosSessionPlayer>? = null
@@ -132,6 +142,11 @@ class CastConnectionHandler(
 
     @Volatile
     private var lastState = ""
+
+    // Furthest position seen while the current track was playing, and whether its end was handled.
+    private var furthestPositionMs = 0L
+    private var trackStarted = false
+    private var endHandled = false
 
     init {
         scope.launch {
@@ -180,6 +195,7 @@ class CastConnectionHandler(
 
         client = SonosClient(room.host, lanHttp)
         runCatching { wifiLock?.acquire() }
+        runCatching { wakeLock?.acquire() }
         _connectedRoomId.value = room.id
         _castDeviceName.value = room.name
         _isCasting.value = true
@@ -215,6 +231,7 @@ class CastConnectionHandler(
         musicService.refreshSessionPlayer()
         streamServer.stop()
         runCatching { wifiLock?.release() }
+        runCatching { wakeLock?.release() }
 
         if (resumeAt > 0) musicService.player.seekTo(resumeAt)
         musicService.player.pause()
@@ -232,6 +249,9 @@ class CastConnectionHandler(
             scope.launch {
                 awaitingStart = true
                 loadStartedAt = SystemClock.elapsedRealtime()
+                furthestPositionMs = 0L
+                trackStarted = false
+                endHandled = false
                 _castIsBuffering.value = true
                 try {
                     val localPlayer = musicService.player
@@ -365,12 +385,11 @@ class CastConnectionHandler(
     private suspend fun poll(sonos: SonosClient) {
         val state = sonos.transportState()
         val info = sonos.positionInfo()
-        val previousState = lastState
-        val previousPosition = _castPosition.value
         lastState = state
 
         if (state == STATE_PLAYING) {
             awaitingStart = false
+            trackStarted = true
         } else if (awaitingStart && SystemClock.elapsedRealtime() - loadStartedAt > LOAD_TIMEOUT_MS) {
             Timber.w("Sonos never started playing ${currentMediaId}; giving up")
             awaitingStart = false
@@ -378,7 +397,10 @@ class CastConnectionHandler(
         _castIsBuffering.value = state == STATE_TRANSITIONING || awaitingStart
         _castIsPlaying.value = state == STATE_PLAYING || state == STATE_TRANSITIONING || awaitingStart
         if (info.durationMs > 0) _castDuration.value = info.durationMs
-        if (state == STATE_PLAYING || state == STATE_PAUSED) _castPosition.value = info.positionMs
+        if (state == STATE_PLAYING || state == STATE_PAUSED) {
+            _castPosition.value = info.positionMs
+            if (state == STATE_PLAYING) furthestPositionMs = maxOf(furthestPositionMs, info.positionMs)
+        }
 
         // Pick up volume changes made elsewhere (Sonos app, physical buttons), but not mid-adjustment.
         if (++pollCount % VOLUME_POLL_EVERY == 0 &&
@@ -387,10 +409,17 @@ class CastConnectionHandler(
             runCatching { sonos.volume() }.getOrNull()?.let { _castVolume.value = it / 100f }
         }
 
-        val duration = _castDuration.value
-        val reachedEnd = duration > 0 && previousPosition >= duration - END_TOLERANCE_MS
-        if (!awaitingStart && previousState == STATE_PLAYING && state == STATE_STOPPED && reachedEnd) {
-            onTrackEnded()
+        // Sonos goes to STOPPED when a track runs out (pausing is PAUSED_PLAYBACK). Polls can be
+        // late or skip the PLAYING->STOPPED edge, so judge by how far the track actually got.
+        if (state == STATE_STOPPED && trackStarted && !awaitingStart && !endHandled) {
+            val duration = _castDuration.value
+            val nearEnd = duration <= 0 || furthestPositionMs >= duration - END_TOLERANCE_MS
+            if (nearEnd) {
+                endHandled = true
+                onTrackEnded()
+            } else {
+                Timber.w("Sonos stopped at ${furthestPositionMs}ms of ${duration}ms; not advancing")
+            }
         }
     }
 
@@ -420,7 +449,7 @@ class CastConnectionHandler(
         const val STATE_STOPPED = "STOPPED"
         const val STATE_TRANSITIONING = "TRANSITIONING"
         const val POLL_INTERVAL_MS = 1_000L
-        const val END_TOLERANCE_MS = 3_000L
+        const val END_TOLERANCE_MS = 15_000L
         const val SEEK_THRESHOLD_MS = 2_000L
         const val RESTART_THRESHOLD_MS = 3_000L
         const val LOAD_TIMEOUT_MS = 20_000L
